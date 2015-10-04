@@ -1,11 +1,18 @@
-# OAuth 2 Endpoints for Restify
+# OAuth 2 Endpoints for Restify + OAuth.io modifications
 
 This package provides a *very simple* OAuth 2.0 endpoint for the [Restify][] framework. In particular, it implements
 the [Client Credentials][cc] and [Resource Owner Password Credentials][ropc] flows only.
 
+## OAuth.io notice
+
+This package is a modification of restify-oauth2 to be included in the OAuth Daemon (oauthd) project.
+The main modification is to reply a 403 instead of 401/WWW-Authenticate to avoid basic auth popup in browsers in some cases. We advise to use the original restify-oauth2 if you want to use it in your projects, since the description below may be inexact.
+
+----------------------------------
+
 ## What You Get
 
-If you provide Restify–OAuth2 with the appropriate hooks, it will:
+If you provide Restify–OAuth2–oauthd with the appropriate hooks, it will:
 
 * Set up a [token endpoint][], which returns [access token responses][token-endpoint-success] or
   [correctly-formatted error responses][token-endpoint-error].
@@ -14,22 +21,24 @@ If you provide Restify–OAuth2 with the appropriate hooks, it will:
   * If the token fails validation, it will send [an appropriate 400 or 401 error response][token-usage-error], with a
     [`WWW-Authenticate`][www-authenticate] header and a [`Link`][web-linking] [`rel="oauth2-token"`][oauth2-token-rel]
     header pointing to the token endpoint.
-  * Otherwise, it will set either `req.clientId` or `req.username` (depending on which flow you are using) to a value
-    determined by looking up the access token.
-* If no access token is sent, it simply sets `req.clientId`/`req.username` to `null`:
-  * You can check for this whenever there is a resource you want to protect.
-  * If the user tries to access a protected resource, you can use Restify–OAuth2's `res.sendUnauthorized()` to send
-    appropriate 401 errors with helpful `WWW-Authenticate` and `Link` headers.
+  * Otherwise, you can use your `authenticateToken` and `grantScopes` hooks to set properties on the request object for
+    your routes to check later.
+* If no access token is sent, it ensures that `req.username` is set to `null`; furthermore, none of your hooks are
+  called, so you can be sure that no properties that they set are present.
+  * You can then check for these conditions whenever there is a resource you want to protect.
+  * If the user tries to access a protected resource, you can use Restify–OAuth2–oauthd's `res.sendUnauthenticated()` to send
+    appropriate 401 errors with helpful `WWW-Authenticate` and `Link` headers, or its `res.sendUnauthorized()` to send
+    appropriate 403 errors with similar headers.
 
 ## Use and Configuration
 
-To use Restify–OAuth2, you'll need to pass it your server plus some options, including the hooks discussed below.
-Restify–OAuth2 also depends on the built-in `authorizationParser` and `bodyParser` plugins, the latter with `mapParams`
+To use Restify–OAuth2–oauthd, you'll need to pass it your server plus some options, including the hooks discussed below.
+Restify–OAuth2–oauthd also depends on the built-in `authorizationParser` and `bodyParser` plugins, the latter with `mapParams`
 set to `false`. So in short, it looks like this:
 
 ```js
 var restify = require("restify");
-var restifyOAuth2 = require("restify-oauth2");
+var restifyOAuth2 = require("restify-oauth2-oauthd");
 
 var server = restify.createServer({ name: "My cool server", version: "1.0.0" });
 server.use(restify.authorizationParser());
@@ -40,12 +49,12 @@ restifyOAuth2.cc(server, options);
 restifyOAuth2.ropc(server, options);
 ```
 
-Unfortunately, Restify–OAuth2 can't be a simple Restify plugin. It needs to install a route for the token
+Unfortunately, Restify–OAuth2–oauthd can't be a simple Restify plugin. It needs to install a route for the token
 endpoint, whereas plugins simply run on every request and don't modify the server's routing table.
 
 ## Options
 
-The options you pass to Restify–OAuth2 depend heavily on which of the two flows you are choosing. There are some
+The options you pass to Restify–OAuth2–oauthd depend heavily on which of the two flows you are choosing. There are some
 options common to both flows, but the `options.hooks` hash will vary depending on the flow. Once you provide the
 appropriate hooks, you get an OAuth 2 implementation for free.
 
@@ -56,20 +65,22 @@ and if those values authenticate, you grant them an access token they can use fo
 this over simply requiring basic access authentication headers on every request is that now you can set those tokens to
 expire, or revoke them if they fall in to the wrong hands.
 
-To install Restify–OAuth2's client credentials flow into your infrastructure, you will need to provide it with the
+To install Restify–OAuth2–oauthd's client credentials flow into your infrastructure, you will need to provide it with the
 following hooks in the `options.hooks` hash. You can see some [example CC hooks][] in the demo application.
 
-#### `grantClientToken(clientId, clientSecret, cb)`
+#### `grantClientToken({ clientId, clientSecret }, req, cb)`
 
 Checks that the API client is authorized to use your API, and has the correct secret. It should call back with a new
 token for that client if so, or `false` if the credentials are incorrect. It can also call back with an error if there
 was some internal server error while validating the credentials.
 
-#### `authenticateToken(token, cb)`
+#### `authenticateToken(token, req, cb)`
 
-Checks that a token is valid, i.e. that it was granted in the past by `grantClientToken`. It should call back with the
-client ID for that token if so, or `false` if the token is invalid. It can also call back with an error if there
-was some internal server error while looking up the token.
+Checks that a token is valid, i.e. that it was granted in the past by `grantClientToken`. It should call back with
+`true` if so, or `false` if the token is invalid. It can also call back with an error if there was some internal
+server error while looking up the token. If the token is valid, it is likely useful to set a property on the request
+object indicating that so that your routes can check it later, e.g. `req.authenticated = true` or
+`req.clientId = lookupClientIdFrom(token)`.
 
 ### Resource Owner Password Credentials Hooks
 
@@ -79,27 +90,52 @@ credentials to the server directly. For example, it obviates the need for the cl
 allows expiration and revocation of tokens. However, it does imply that you trust your API clients, since they will
 have at least one-time access to the user's credentials.
 
-To install Restify–OAuth2's resource owner password credentials flow into your infrastructure, you will need to
+To install Restify–OAuth2–oauthd's resource owner password credentials flow into your infrastructure, you will need to
 provide it with the following hooks in the `options.hooks` hash. You can see some [example ROPC hooks][] in the demo
 application.
 
-#### `validateClient(clientId, clientSecret, cb)`
+#### `validateClient({ clientId, clientSecret }, req, cb)`
 
 Checks that the API client is authorized to use your API, and has the correct secret. It should call back with `true`
 or `false` depending on the result of the check. It can also call back with an error if there was some internal server
 error while doing the check.
 
-#### `grantUserToken(username, password, cb)`
+#### `grantUserToken({ clientId, clientSecret, username, password }, req, cb)`
 
 Checks that the API client is authenticating on behalf of a real user with correct credentials. It should call back
 with a new token for that user if so, or `false` if the credentials are incorrect. It can also call back with an error
 if there was some internal server error while validating the credentials.
 
-#### `authenticateToken(token, cb)`
+#### `authenticateToken(token, req, cb)`
 
-Checks that a token is valid, i.e. that it was granted in the past by `grantUserToken`. It should call back with the
-username for that token if so, or `false` if the token is invalid. It can also call back with an error if there
-was some internal server error while looking up the token.
+Checks that a token is valid, i.e. that it was granted in the past by `grantUserToken`. It should call back with
+`true` if so, or `false` if the token is invalid. It can also call back with an error if there was some internal
+server error while looking up the token. If the token is valid, it is likely useful to set a property on the request
+object indicating that so that your routes can check it later, e.g. `req.authenticated = true` or
+`req.username = lookupUsernameFrom(token)`.
+
+### Scope-Granting Hook
+
+Optionally, it is possible to limit the [scope][] of the issued tokens, so that you can implement an authorization
+system in your application in addition to simple authentication.
+
+#### `grantScopes(credentials, scopesRequested, req, cb)`
+
+This hook is called after the token has been granted by `authenticateToken`. In the client credentials flow,
+`credentials` will be `{ clientId, clientSecret, token }`; in the resource owner password credentials flow, it will be
+`{ clientId, clientSecret, username, password, token }`. In both cases, `scopesRequested` will be an array of the
+requested scopes.
+
+This hook can respond in several ways:
+
+* It can call back with `true` to grant all of the requested scopes.
+* It can call back with `false` to indicate that the requested scopes are invalid, unknown, or exceed the set of scopes
+  that should be granted to the given credentials.
+* It can call back with an array to grant a different set of scopes.
+* It can call back with an error if there was some internal server error while granting scopes.
+
+In the cases of `false` or an internal server error, you should probably revoke the token before calling back, as the
+server will send the user an error response, instead of a successful token grant.
 
 ### Other Options
 
@@ -125,16 +161,16 @@ The initial resource, at which people enter the server.
 * If a valid token is supplied in the `Authorization` header, `req.username` is truthy, and the app responds with
   links to `/public` and `/secret`.
 * If no token is supplied, the app responds with links to `/token` and `/public`.
-* If an invalid token is supplied, Restify–OAuth2 intercepts the request before it gets to the application, and sends
+* If an invalid token is supplied, Restify–OAuth2–oauthd intercepts the request before it gets to the application, and sends
   an appropriate 400 or 401 error.
 
 ## /token
 
-The token endpoint, managed entirely by Restify–OAuth2. It generates tokens for a given client ID/client
+The token endpoint, managed entirely by Restify–OAuth2–oauthd. It generates tokens for a given client ID/client
 secret/username/password combination.
 
 The client validation and token-generation logic is provided by the application, but none of the ceremony necessary for
-OAuth 2 conformance, error handling, etc. is present in the application code: Restify–OAuth2 takes care of all of that.
+OAuth 2 conformance, error handling, etc. is present in the application code: Restify–OAuth2–oauthd takes care of all of that.
 
 ## /public
 
@@ -143,7 +179,7 @@ A public resource anyone can access.
 * If a valid token is supplied in the Authorization header, `req.username` contains the username, and the app uses
   that to send a personalized response.
 * If no token is supplied, `req.username` is `null`. The app still sends a response, just without personalizing.
-* If an invalid token is supplied, Restify–OAuth2 intercepts the request before it gets to the application, and sends
+* If an invalid token is supplied, Restify–OAuth2–oauthd intercepts the request before it gets to the application, and sends
   an appropriate 400 or 401 error.
 
 ## /secret
@@ -152,9 +188,9 @@ A secret resource that only authenticated users can access.
 
 * If a valid token is supplied in the Authorization header, `req.username` is truthy, and the app sends the secret
   data.
-* If no token is supplied, `req.username` is `null`, so the application uses `res.sendUnauthorized()` to send a nice
+* If no token is supplied, `req.username` is `null`, so the application uses `res.sendUnauthenticated()` to send a nice
   401 error with `WWW-Authenticate` and `Link` headers.
-* If an invalid token is supplied, Restify–OAuth2 intercepts the request before it gets to the application, and sends
+* If an invalid token is supplied, Restify–OAuth2–oauthd intercepts the request before it gets to the application, and sends
   an appropriate 400 or 401 error.
 
 [Restify]: http://mcavage.github.com/node-restify/
@@ -168,6 +204,7 @@ A secret resource that only authenticated users can access.
 [oauth2-token-rel]: http://tools.ietf.org/html/draft-wmills-oauth-lrdd-07#section-3.2
 [web-linking]: http://tools.ietf.org/html/rfc5988
 [www-authenticate]: http://tools.ietf.org/html/rfc2617#section-3.2.1
+[scope]: http://tools.ietf.org/html/rfc6749#section-3.3
 [example ROPC hooks]: https://github.com/domenic/restify-oauth2/blob/master/examples/ropc/hooks.js
 [example CC hooks]: https://github.com/domenic/restify-oauth2/blob/master/examples/cc/hooks.js
 [example servers]: https://github.com/domenic/restify-oauth2/tree/master/examples
